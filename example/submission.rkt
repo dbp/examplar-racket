@@ -1,4 +1,4 @@
-#lang htdp/asl
+#lang htdp/isl
 
 (: F (Natural -> Natural))
 ; Computes the factorial of a number
