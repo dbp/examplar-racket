@@ -50,8 +50,8 @@
   (empty? (failing-tests path functions sub-ns)))
 
 
-(struct correctness [wheat-total wheat-accepted] #:transparent)
-(struct thoroughness [chaff-total chaff-rejected] #:transparent)
+(struct correctness [wheat-all wheat-accepted] #:transparent)
+(struct thoroughness [chaff-all chaff-rejected] #:transparent)
 (struct precision [chaff-rejected distinct-test-sets] #:transparent)
 (struct usefulness [failing-tests distinct-chaff-sets] #:transparent)
 
@@ -66,24 +66,16 @@
   (define CHAFFS-PATH (string-append examplar-dir (chaffs-subdir) "/"))
 
   (define WHEATS (filter is-racket-file?
-                         (map (lambda (p)
-                                (string-append WHEATS-PATH
-                                               (path->string p)))
-                              (directory-list WHEATS-PATH))))
+                         (map path->string (directory-list WHEATS-PATH))))
   (define CHAFFS (filter is-racket-file?
-                         (map (lambda (p)
-                                (string-append CHAFFS-PATH
-                                               (path->string p)))
-                              (directory-list CHAFFS-PATH))))
+                         (map path->string (directory-list CHAFFS-PATH))))
   
   ;; Wheats are relatively straightforward: we want to
   ;; know how many are accepted, giving as score as such.
   (define wheat-correctness
-    (let [(wheat-count (length WHEATS))
-          (wheat-accept
-           (length (filter (lambda (w) (all-tests-pass w functions sub-ns))
-                           WHEATS)))]
-      (correctness wheat-count wheat-accept)))
+    (correctness WHEATS
+                 (filter (lambda (w) (all-tests-pass (string-append WHEATS-PATH w) functions sub-ns))
+                         WHEATS)))
 
   ;; Chaffs have three different measures. In order to account for that,
   ;; we first record, for each chaff, a list of tests (by srcloc) that
@@ -96,18 +88,18 @@
     (filter (lambda (cr)
               (not (empty? (chaff-recognizers cr))))
             (map (lambda (c)
-                   (chaff c (failing-tests c functions sub-ns)))
+                   (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns)))
                  CHAFFS)))
 
   ;; How many of the chaffs did test catch?
   (define chaff-thoroughness
-    (thoroughness (length CHAFFS) (length chaff-records)))
+    (thoroughness CHAFFS (map chaff-name chaff-records)))
 
   ;; Are chaffs detected by _different_ sets of tests?
   (define chaff-precision
     (precision (thoroughness-chaff-rejected chaff-thoroughness)
-               (length (remove-duplicates
-                        (map chaff-recognizers chaff-records)))))
+               (remove-duplicates
+                (map chaff-recognizers chaff-records))))
 
   (define test-records
     (map
@@ -119,9 +111,9 @@
      (remove-duplicates (apply append (map chaff-recognizers chaff-records)))))
   ;; Are tests failing different chaffs?
   (define test-usefulness
-    (usefulness (length test-records)
-                (length (remove-duplicates
-                         (map testinfo-detected test-records)))))
+    (usefulness (map testinfo-srcloc test-records)
+                (remove-duplicates
+                 (map testinfo-detected test-records))))
 
   (list wheat-correctness
         chaff-thoroughness
