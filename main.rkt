@@ -74,25 +74,26 @@
   (check-equal? (failing-tests "test/wheats/wheat1.rkt" '(F) test-ns) '())
   (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(I) test-ns)) 2)
   (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(F I) test-ns)) 2)
-  (check-equal? (failing-tests "test/chaffs/both-identity.rkt" '() test-ns) '())
-  (check-equal? (length (failing-tests "test/chaffs/both-identity.rkt" '(F) test-ns)) 3)
-  (check-equal? (length (failing-tests "test/chaffs/both-identity.rkt" '(I) test-ns)) 3)
-  (check-equal? (length (failing-tests "test/chaffs/both-identity.rkt" '(F I) test-ns)) 6)
-  (check-equal? (length (failing-tests "test/chaffs/F-zero-identity.rkt" '(F) test-ns)) 2)
+  (check-equal? (failing-tests "test/chaffs/identity.rkt" '() test-ns) '())
+  (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F) test-ns)) 3)
+  (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(I) test-ns)) 3)
+  (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F I) test-ns)) 6)
+  (check-equal? (length (failing-tests "test/chaffs-F/zero-identity.rkt" '(F) test-ns)) 2)
   (check-exn exn:fail? (lambda ()
-                         (failing-tests "test/chaffs/F-zero-identity.rkt" '(I) test-ns)))
-  (check-equal? (length (failing-tests "test/chaffs/I-empty-str.rkt" '(I) test-ns)) 2))
+                         (failing-tests "test/chaffs-F/zero-identity.rkt" '(I) test-ns)))
+  (check-equal? (length (failing-tests "test/chaffs-I/empty-str.rkt" '(I) test-ns)) 2))
   
 
 
 (define (all-tests-pass path functions sub-ns)
   (empty? (failing-tests path functions sub-ns)))
 
+(struct pair [fst snd] #:transparent)
 
-(struct correctness [wheat-all wheat-accepted] #:transparent)
-(struct thoroughness [chaff-all chaff-rejected] #:transparent)
-(struct precision [chaff-rejected distinct-test-sets] #:transparent)
-(struct usefulness [failing-tests distinct-chaff-sets] #:transparent)
+(struct correctness [wheat-all wheat-failing] #:transparent)
+(struct thoroughness [chaff-all chaff-accepted] #:transparent)
+(struct precision [map] #:transparent)
+(struct usefulness [map] #:transparent)
 
 (struct chaff [name recognizers] #:transparent)
 (struct testinfo [srcloc detected] #:transparent)
@@ -113,8 +114,11 @@
   ;; know how many are accepted, giving as score as such.
   (define wheat-correctness
     (correctness WHEATS
-                 (filter (lambda (w) (all-tests-pass (string-append WHEATS-PATH w) functions sub-ns))
-                         WHEATS)))
+                 (filter
+                  (lambda (wp) (cons? (pair-snd wp)))
+                  (map (lambda (w)
+                           (pair w (failing-tests (string-append WHEATS-PATH w) functions sub-ns)))
+                       WHEATS))))
 
   ;; Chaffs have three different measures. In order to account for that,
   ;; we first record, for each chaff, a list of tests (by srcloc) that
@@ -130,15 +134,21 @@
                    (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns)))
                  CHAFFS)))
 
-  ;; How many of the chaffs did test catch?
+  ;; How many of the chaffs did test miss?
   (define chaff-thoroughness
-    (thoroughness CHAFFS (map chaff-name chaff-records)))
+    (let [(detected (map chaff-name chaff-records))]
+      (thoroughness CHAFFS (filter (lambda (c) (not (member c detected))) CHAFFS))))
 
   ;; Are chaffs detected by _different_ sets of tests?
   (define chaff-precision
-    (precision (thoroughness-chaff-rejected chaff-thoroughness)
-               (remove-duplicates
-                (map chaff-recognizers chaff-records))))
+    (precision
+     (map (lambda (lc)
+            (pair (map chaff-name lc)
+                  (chaff-recognizers (first lc))))
+          (group-by (lambda (cr) (sort (chaff-recognizers cr)
+                                       (lambda (sl1 sl2) (string<? (format "~e" sl1)
+                                                                   (format "~e" sl2)))))
+                    chaff-records))))
 
   (define test-records
     (map
@@ -150,14 +160,47 @@
      (remove-duplicates (apply append (map chaff-recognizers chaff-records)))))
   ;; Are tests failing different chaffs?
   (define test-usefulness
-    (usefulness (map testinfo-srcloc test-records)
-                (remove-duplicates
-                 (map testinfo-detected test-records))))
+    (usefulness
+     (map (lambda (til)
+            (pair (map testinfo-srcloc til)
+                  (testinfo-detected (first til))))
+          (group-by
+           (lambda (ti) (sort (testinfo-detected ti) string<?))
+           test-records))))
 
   (list wheat-correctness
         chaff-thoroughness
         chaff-precision
         test-usefulness))
 
+(module+ test
+  (require rackunit)
+  (check-equal?
+   (first (run-examplar! "test/submission.rkt" "test/" '(F)))
+   (correctness '("wheat1.rkt") '()))
+  (check-equal?
+   (map pair-fst
+    (correctness-wheat-failing
+     (first (run-examplar! "test/submission.rkt" "test/" '(F I)))))
+   '("wheat1.rkt"))
+  (check-equal?
+   (map
+    length
+    (map pair-snd
+         (correctness-wheat-failing
+          (first (run-examplar! "test/submission.rkt" "test/" '(F I))))))
+   '(2))
+  (check-equal?
+   (second (run-examplar! "test/submission.rkt" "test/" '(F I)))
+   (thoroughness '("empty.rkt" "empty2.rkt" "identity.rkt" "subtle.rkt")
+                 '("subtle.rkt")))
 
+  (check-equal?
+   (map pair-fst (precision-map (third (run-examplar! "test/submission.rkt" "test/" '(F I)))))
+   '(("empty.rkt" "empty2.rkt") ("identity.rkt")))
 
+  (check-equal?
+   (map pair-snd (usefulness-map (fourth (run-examplar! "test/submission.rkt" "test/" '(F I)))))
+   '(("empty.rkt" "empty2.rkt" "identity.rkt")
+     ("empty.rkt" "empty2.rkt")
+     ("identity.rkt"))))
