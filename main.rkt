@@ -4,7 +4,15 @@
 (require test-engine/racket-tests)
 (require test-engine/test-engine)
 
-(provide run-examplar! failing-tests wheats-subdir chaffs-subdir)
+(provide run-examplar!
+         (struct-out correctness)
+         (struct-out thoroughness)
+         (struct-out precision)
+         (struct-out usefulness)
+         (struct-out pair)
+         failing-tests
+         wheats-subdir
+         chaffs-subdir)
 
 (define wheats-subdir (make-parameter "wheats"))
 (define chaffs-subdir (make-parameter "chaffs"))
@@ -83,10 +91,6 @@
                          (failing-tests "test/chaffs-F/zero-identity.rkt" '(I) test-ns)))
   (check-equal? (length (failing-tests "test/chaffs-I/empty-str.rkt" '(I) test-ns)) 2))
   
-
-
-(define (all-tests-pass path functions sub-ns)
-  (empty? (failing-tests path functions sub-ns)))
 
 (struct pair [fst snd] #:transparent)
 
