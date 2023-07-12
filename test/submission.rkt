@@ -1,4 +1,4 @@
-#lang htdp/isl
+#lang htdp/bsl
 
 (: F (Natural -> Natural))
 ; Computes the factorial of a number
@@ -13,9 +13,9 @@
 
 (: I ([ListOf String] -> String))
 ; Joins a list of strings, separating with spaces
-(check-expect (I '("a" "b" "c")) "a b c ")
-(check-expect (I '("a")) "a ")
-(check-expect (I '()) "")
+(check-expect (I (list "a" "b" "c")) "a b c ")
+(check-expect (I (list "a")) "a ")
+(check-expect (I (list)) "")
 (define (I los)
   (cond [(empty? los) ""]
         [(cons? los) (string-append (first los) " " (I (rest los)))]))
