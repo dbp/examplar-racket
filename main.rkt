@@ -49,7 +49,7 @@
 ;; but with identifiers from `functions` taken from `path` and replaced in
 ;; `sub-ns`
 (define (failing-tests path functions sub-ns)
-  ; force ISL/ISL+ to be ASL
+  ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
     
     ;; Get the module where overriding definitions comes from
@@ -80,7 +80,7 @@
 
 (module+ test
   (require rackunit)
-  ; force ISL/ISL+ to be ASL
+  ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
     (dynamic-require "test/submission.rkt" #f)
     (define test-ns (module->namespace "test/submission.rkt"))
@@ -108,7 +108,7 @@
 (struct testinfo [srcloc detected] #:transparent)
 
 (define (run-examplar! submission-path examplar-dir functions)
-  ; force ISL/ISL+ to be ASL
+  ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
     (dynamic-require submission-path #f)
     (define sub-ns (module->namespace submission-path))
