@@ -5,6 +5,8 @@
 (require test-engine/test-engine)
 
 (provide run-examplar!
+         (struct-out result)
+         (struct-out self)
          (struct-out reference)
          (struct-out correctness)
          (struct-out thoroughness)
@@ -108,11 +110,14 @@
 
 (struct pair [fst snd] #:transparent)
 
+(struct self [tests-run tests-failed] #:transparent)
 (struct reference [tests-run tests-failed] #:transparent)
 (struct correctness [wheat-all wheat-failing] #:transparent)
 (struct thoroughness [chaff-all chaff-accepted] #:transparent)
 (struct precision [map] #:transparent)
 (struct usefulness [map] #:transparent)
+
+(struct result [self reference wheat chaff precision usefulness] #:transparent)
 
 (struct chaff [name recognizers] #:transparent)
 (struct testinfo [srcloc detected] #:transparent)
@@ -162,8 +167,50 @@
 
     (define sub-ns (module->namespace submission-path))
 
+    ;; First task: run their own tests on their own code! Self-consistency is important,
+    ;; though it is not everything: it may be that you couldn't figure out how to get
+    ;; a given test to pass, and we don't want to encourage deleting tests.
+    ;;
+    ;; This would seem to be easy: just run the submission-tests. The problem is that not
+    ;; all of those are relevant to the given functions... So we end up having to play
+    ;; interposition hackery.
+    ;;
+    ;; First, we tag all of the functions in question so that they, when running, first
+    ;; flip a flag.
+    (define ran-fn #f)
+    (parameterize [(current-namespace sub-ns)]
+      (for ([fn-sym functions])
+        (let* [(fun (eval `(,#'first-order->higher-order
+                            ,(namespace-symbol->identifier fn-sym)) sub-ns))
+               (fun-flagging (impersonate-procedure fun (lambda args (begin (set! ran-fn #t) (apply values args)))))]
+          (parameterize [(current-namespace sub-ns)]
+            (namespace-set-variable-value! fn-sym fun-flagging #t)))))
 
-    ;; First, we run their solution against our reference test suite
+    (define self-tests
+      (filter pair?
+              (map (lambda (test-thunk)
+                     (begin (initialize-test-object!)
+                            (set! ran-fn #f)
+                            (add-test! test-thunk)
+                            (parameterize [(test-silence #t)] (test))
+                            (if ran-fn
+                                (if (empty? (test-object-failed-checks (current-test-object)))
+                                    (pair test-thunk #t)
+                                    ;; Really hoping there is only one check!
+                                    (pair test-thunk (fail-reason-srcloc (failed-check-reason (first (test-object-failed-checks (current-test-object)))))))
+                                #f)))
+                   submission-tests)))
+
+    (define self-result
+      (self (map pair-fst self-tests)
+            (map pair-snd (filter (lambda (p) (not (equal? (pair-snd p) #t))) self-tests))))
+    
+    ;; Now we reset what test-engine knows about.
+    (initialize-test-object!)
+
+
+
+    ;; Next, we run their solution against our reference test suite
 
     ;; TODO: refactor this, as its copy-paste from `failing-tests` above.
     ;; To do this, we put their functions into our reference modules
@@ -266,30 +313,34 @@
              (lambda (ti) (sort (testinfo-detected ti) string<?))
              test-records))))
 
-    (define result
-      (list reference-result
-            wheat-correctness
-            chaff-thoroughness
-            chaff-precision
-            test-usefulness))
+    (define the-result
+      (result
+       self-result
+       reference-result
+       wheat-correctness
+       chaff-thoroughness
+       chaff-precision
+       test-usefulness))
 
     ;; Clean up temp files
     (delete-file submission-path)
     (delete-file reference-path)
 
-    result))
+    the-result))
 
 (module+ test
   (require rackunit)
   (define er (run-examplar! "test/submission.rkt" "test/reference.rkt" "test/" '(F I)))
   ;(display er)
 
-  (check-equal? (length (reference-tests-failed (first er))) 2)
+  (check-equal? (length (self-tests-failed (result-self er))) 0)
+
+  (check-equal? (length (reference-tests-failed (result-reference er))) 2)
 
   (check-equal?
    (map pair-fst
     (correctness-wheat-failing
-     (second er)))
+     (result-wheat er)))
    '("wheat1.rkt"))
 
   (check-equal?
@@ -297,17 +348,17 @@
     length
     (map pair-snd
          (correctness-wheat-failing
-          (second er))))
+          (result-wheat er))))
    '(2))
   (check-equal?
-   (third er)
+   (result-chaff er)
    (thoroughness '("empty.rkt" "empty2.rkt" "identity.rkt" "subtle.rkt")
                  '("subtle.rkt")))
   (check-equal?
-   (map pair-fst (precision-map (fourth er)))
+   (map pair-fst (precision-map (result-precision er)))
    '(("empty.rkt" "empty2.rkt") ("identity.rkt")))
   (check-equal?
-   (map pair-snd (usefulness-map (fifth er)))
+   (map pair-snd (usefulness-map (result-usefulness er)))
    '(("empty.rkt" "empty2.rkt" "identity.rkt")
      ("empty.rkt" "empty2.rkt")
      ("identity.rkt"))))
