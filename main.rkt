@@ -84,10 +84,12 @@
 
 (module+ test
   (require rackunit)
+  (define test-path
+    (make-temporary-file "examplartmp~a.rkt" #:copy-from "test/submission.rkt"))
   ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
-    (namespace-require "test/submission2.rkt")
-    (define test-ns (module->namespace "test/submission2.rkt"))
+    (namespace-require test-path)
+    (define test-ns (module->namespace test-path))
     (define test-tests (test-object-tests (current-test-object)))
     (check-equal? (failing-tests "test/wheats/wheat1.rkt" '(F) test-ns test-tests) '())
     (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(I) test-ns test-tests)) 2)
@@ -99,7 +101,9 @@
     (check-equal? (length (failing-tests "test/chaffs-F/zero-identity.rkt" '(F) test-ns test-tests)) 2)
     (check-exn exn:fail? (lambda ()
                            (failing-tests "test/chaffs-F/zero-identity.rkt" '(I) test-ns test-tests)))
-    (check-equal? (length (failing-tests "test/chaffs-I/empty-str.rkt" '(I) test-ns test-tests)) 2)))
+    (check-equal? (length (failing-tests "test/chaffs-I/empty-str.rkt" '(I) test-ns test-tests)) 2))
+
+  (delete-file test-path))
 
 
 (struct pair [fst snd] #:transparent)
@@ -113,7 +117,27 @@
 (struct chaff [name recognizers] #:transparent)
 (struct testinfo [srcloc detected] #:transparent)
 
-(define (run-examplar! submission-path reference-path examplar-dir functions)
+(define (run-examplar! submission-path-orig reference-path-orig examplar-dir functions)
+  ;; For two reasons, we will copy the submission / reference files into new temporary files:
+  ;; 1. namespace-require/dynamic-require/anything-i've-found will not instantiate/load
+  ;;    a module _twice_, which means that test-engine tests will not be registered
+  ;;    if the module has ever been required before. This is very bad, since
+  ;;    we want to be able to call `run-examplar!` once _per_ function, rather
+  ;;    than once _per_ file.
+  ;; 2. If, for some reason, a file has already been compiled _outside_ of our
+  ;;    resolver hackery, our interposition will not work. I don't expect this
+  ;;    to occur outside of debugging contexts, but I'd rather not mess with it:
+  ;;    if the file has never been seen by Racket before, it cannot have already been
+  ;;    compiled.
+  ;;
+  ;; Note that currently, we are _not_ doing this for wheats/chaffs, as:
+  ;; - We do not use test-engine in them
+  ;; - We only ever _extract_ definitions from them, so we don't actually need to
+  ;;   change the language (and, indeed, they could be written in, e.g. #lang racket)
+
+  (define submission-path (make-temporary-file "examplartmp~a.rkt" #:copy-from submission-path-orig))
+  (define reference-path (make-temporary-file "examplartmp~a.rkt" #:copy-from reference-path-orig))
+
   ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
 
@@ -166,7 +190,7 @@
         (namespace-set-variable-value! (car fn) (cdr fn) #t)))
 
     (define reference-result
-      (reference (length (test-object-tests (current-test-object)))
+      (reference (test-object-tests (current-test-object))
                  (map (lambda (fc)
                         (fail-reason-srcloc (failed-check-reason fc)))
                       (test-object-failed-checks (current-test-object)))))
@@ -242,11 +266,18 @@
              (lambda (ti) (sort (testinfo-detected ti) string<?))
              test-records))))
 
-    (list reference-result
-          wheat-correctness
-          chaff-thoroughness
-          chaff-precision
-          test-usefulness)))
+    (define result
+      (list reference-result
+            wheat-correctness
+            chaff-thoroughness
+            chaff-precision
+            test-usefulness))
+
+    ;; Clean up temp files
+    (delete-file submission-path)
+    (delete-file reference-path)
+
+    result))
 
 (module+ test
   (require rackunit)
