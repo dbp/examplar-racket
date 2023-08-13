@@ -5,6 +5,7 @@
 (require test-engine/test-engine)
 
 (provide run-examplar!
+         (struct-out reference)
          (struct-out correctness)
          (struct-out thoroughness)
          (struct-out precision)
@@ -48,12 +49,12 @@
 ;; This function runs all checks currently registered with test-engine,
 ;; but with identifiers from `functions` taken from `path` and replaced in
 ;; `sub-ns`
-(define (failing-tests path functions sub-ns)
+(define (failing-tests path functions sub-ns test-thunks)
   ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
-    
+
     ;; Get the module where overriding definitions comes from
-    (dynamic-require path #f)
+    (namespace-require path)
     (define path-ns (module->namespace path))
     ;; Cache old definitions
     (define old-fns (map (lambda (f) (cons f
@@ -67,8 +68,11 @@
                            ,(namespace-symbol->identifier fn-sym)) path-ns))]
           (parameterize [(current-namespace sub-ns)]
             (namespace-set-variable-value! fn-sym fun #t)))))
-    ;; Run all tests registered with test-engine (a little fragile)
+    ;; Reset test object and run the tests given.
+    (initialize-test-object!)
+    (for-each (lambda (thnk) (add-test! thnk)) test-thunks)
     (parameterize [(test-silence #t)] (test))
+
     ;; Reset definitions to what they were originally
     (parameterize [(current-namespace sub-ns)]
       (for ([fn old-fns])
@@ -82,23 +86,25 @@
   (require rackunit)
   ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
-    (dynamic-require "test/submission.rkt" #f)
-    (define test-ns (module->namespace "test/submission.rkt"))
-    (check-equal? (failing-tests "test/wheats/wheat1.rkt" '(F) test-ns) '())
-    (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(I) test-ns)) 2)
-    (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(F I) test-ns)) 2)
-    (check-equal? (failing-tests "test/chaffs/identity.rkt" '() test-ns) '())
-    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F) test-ns)) 3)
-    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(I) test-ns)) 3)
-    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F I) test-ns)) 6)
-    (check-equal? (length (failing-tests "test/chaffs-F/zero-identity.rkt" '(F) test-ns)) 2)
+    (namespace-require "test/submission2.rkt")
+    (define test-ns (module->namespace "test/submission2.rkt"))
+    (define test-tests (test-object-tests (current-test-object)))
+    (check-equal? (failing-tests "test/wheats/wheat1.rkt" '(F) test-ns test-tests) '())
+    (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(I) test-ns test-tests)) 2)
+    (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(F I) test-ns test-tests)) 2)
+    (check-equal? (failing-tests "test/chaffs/identity.rkt" '() test-ns test-tests) '())
+    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F) test-ns test-tests)) 3)
+    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(I) test-ns test-tests)) 3)
+    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F I) test-ns test-tests)) 6)
+    (check-equal? (length (failing-tests "test/chaffs-F/zero-identity.rkt" '(F) test-ns test-tests)) 2)
     (check-exn exn:fail? (lambda ()
-                           (failing-tests "test/chaffs-F/zero-identity.rkt" '(I) test-ns)))
-    (check-equal? (length (failing-tests "test/chaffs-I/empty-str.rkt" '(I) test-ns)) 2)))
-  
+                           (failing-tests "test/chaffs-F/zero-identity.rkt" '(I) test-ns test-tests)))
+    (check-equal? (length (failing-tests "test/chaffs-I/empty-str.rkt" '(I) test-ns test-tests)) 2)))
+
 
 (struct pair [fst snd] #:transparent)
 
+(struct reference [tests-run tests-failed] #:transparent)
 (struct correctness [wheat-all wheat-failing] #:transparent)
 (struct thoroughness [chaff-all chaff-accepted] #:transparent)
 (struct precision [map] #:transparent)
@@ -107,11 +113,68 @@
 (struct chaff [name recognizers] #:transparent)
 (struct testinfo [srcloc detected] #:transparent)
 
-(define (run-examplar! submission-path examplar-dir functions)
+(define (run-examplar! submission-path reference-path examplar-dir functions)
   ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
-    (dynamic-require submission-path #f)
+
+    ;; test-engine stores tests, which get registered on module load,
+    ;; in a (private) global variable, so we have to do a little bit
+    ;; of manipulation to get what we want.
+
+    ;; First, we'll get the reference tests
+    (initialize-test-object!)
+    (namespace-require reference-path)
+    (define reference-tests (test-object-tests (current-test-object)))
+
+    ;; Now, we'll get the submission tests
+    (initialize-test-object!)
+    (namespace-require submission-path)
+    (define submission-tests (test-object-tests (current-test-object)))
+
+    ;; Finally, we'll reset the test-engine tests. When we want
+    ;; to run specific tests, we'll have to set them again using `add-test!`.
+    (initialize-test-object!)
+
+
     (define sub-ns (module->namespace submission-path))
+
+
+    ;; First, we run their solution against our reference test suite
+
+    ;; TODO: refactor this, as its copy-paste from `failing-tests` above.
+    ;; To do this, we put their functions into our reference modules
+    (define ref-ns (module->namespace reference-path))
+    (define old-fns (map (lambda (f) (cons f
+                                           (eval `(,#'first-order->higher-order
+                                                   ,(namespace-symbol->identifier f)) ref-ns)))
+                         functions))
+
+    (parameterize [(current-namespace sub-ns)]
+      (for ([fn-sym functions])
+        (let [(fun (eval `(,#'first-order->higher-order
+                           ,(namespace-symbol->identifier fn-sym)) sub-ns))]
+          (parameterize [(current-namespace ref-ns)]
+            (namespace-set-variable-value! fn-sym fun #t)))))
+    ;; Now run our tests
+    (initialize-test-object!)
+    (for-each (lambda (thnk) (add-test! thnk)) reference-tests)
+    (parameterize [(test-silence #t)] (test))
+
+    ;; Reset definitions to what they were originally
+    (parameterize [(current-namespace sub-ns)]
+      (for ([fn old-fns])
+        (namespace-set-variable-value! (car fn) (cdr fn) #t)))
+
+    (define reference-result
+      (reference (length (test-object-tests (current-test-object)))
+                 (map (lambda (fc)
+                        (fail-reason-srcloc (failed-check-reason fc)))
+                      (test-object-failed-checks (current-test-object)))))
+
+    ;; Now we reset what test-engine knows about.
+    (initialize-test-object!)
+
+
 
     (define WHEATS-PATH (string-append examplar-dir (wheats-subdir) "/"))
     (define CHAFFS-PATH (string-append examplar-dir (chaffs-subdir) "/"))
@@ -120,7 +183,7 @@
                            (map path->string (directory-list WHEATS-PATH))))
     (define CHAFFS (filter is-racket-file?
                            (map path->string (directory-list CHAFFS-PATH))))
-  
+
     ;; Wheats are relatively straightforward: we want to
     ;; know how many are accepted, giving as score as such.
     (define wheat-correctness
@@ -128,12 +191,12 @@
                    (filter
                     (lambda (wp) (cons? (pair-snd wp)))
                     (map (lambda (w)
-                           (pair w (failing-tests (string-append WHEATS-PATH w) functions sub-ns)))
+                           (pair w (failing-tests (string-append WHEATS-PATH w) functions sub-ns submission-tests)))
                          WHEATS))))
 
     ;; Chaffs have three different measures. In order to account for that,
     ;; we first record, for each chaff, a list of tests (by srcloc) that
-    ;; detect it. 
+    ;; detect it.
 
 
     ;; This is a mapping from
@@ -142,7 +205,7 @@
       (filter (lambda (cr)
                 (not (empty? (chaff-recognizers cr))))
               (map (lambda (c)
-                     (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns)))
+                     (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns submission-tests)))
                    CHAFFS)))
 
     ;; How many of the chaffs did test miss?
@@ -179,39 +242,41 @@
              (lambda (ti) (sort (testinfo-detected ti) string<?))
              test-records))))
 
-    (list wheat-correctness
+    (list reference-result
+          wheat-correctness
           chaff-thoroughness
           chaff-precision
           test-usefulness)))
 
 (module+ test
   (require rackunit)
-  (check-equal?
-   (first (run-examplar! "test/submission.rkt" "test/" '(F)))
-   (correctness '("wheat1.rkt") '()))
+  (define er (run-examplar! "test/submission.rkt" "test/reference.rkt" "test/" '(F I)))
+  ;(display er)
+
+  (check-equal? (length (reference-tests-failed (first er))) 2)
+
   (check-equal?
    (map pair-fst
     (correctness-wheat-failing
-     (first (run-examplar! "test/submission.rkt" "test/" '(F I)))))
+     (second er)))
    '("wheat1.rkt"))
+
   (check-equal?
    (map
     length
     (map pair-snd
          (correctness-wheat-failing
-          (first (run-examplar! "test/submission.rkt" "test/" '(F I))))))
+          (second er))))
    '(2))
   (check-equal?
-   (second (run-examplar! "test/submission.rkt" "test/" '(F I)))
+   (third er)
    (thoroughness '("empty.rkt" "empty2.rkt" "identity.rkt" "subtle.rkt")
                  '("subtle.rkt")))
-
   (check-equal?
-   (map pair-fst (precision-map (third (run-examplar! "test/submission.rkt" "test/" '(F I)))))
+   (map pair-fst (precision-map (fourth er)))
    '(("empty.rkt" "empty2.rkt") ("identity.rkt")))
-
   (check-equal?
-   (map pair-snd (usefulness-map (fourth (run-examplar! "test/submission.rkt" "test/" '(F I)))))
+   (map pair-snd (usefulness-map (fifth er)))
    '(("empty.rkt" "empty2.rkt" "identity.rkt")
      ("empty.rkt" "empty2.rkt")
      ("identity.rkt"))))
