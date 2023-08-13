@@ -1,4 +1,4 @@
 
 ```  
-(run-examplar! "test/submission.rkt" "test/" '(F))
+(run-examplar! "test/submission.rkt" "test/reference.rkt" "test/" '(F))
 ```
