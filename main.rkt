@@ -3,6 +3,7 @@
 (require lang/prim)
 (require test-engine/racket-tests)
 (require test-engine/test-engine)
+(require json)
 
 (provide run-examplar!
          (struct-out result)
@@ -14,9 +15,14 @@
          (struct-out usefulness)
          (struct-out pair)
          failing-tests
+         examplar-dir
          wheats-subdir
-         chaffs-subdir)
+         chaffs-subdir
 
+         run-gradescope
+         (struct-out point-allocation))
+
+(define examplar-dir (make-parameter ""))
 (define wheats-subdir (make-parameter "wheats"))
 (define chaffs-subdir (make-parameter "chaffs"))
 
@@ -48,41 +54,74 @@
   (check-false (is-racket-file? "submission.rkt~"))
   (check-false (is-racket-file? "something/rkt/blah.txt")))
 
-;; This function runs all checks currently registered with test-engine,
-;; but with identifiers from `functions` taken from `path` and replaced in
-;; `sub-ns`
-(define (failing-tests path functions sub-ns test-thunks)
+(define (run-flagged-tests flag tests)
+  (filter pair?
+          (map (lambda (test-thunk)
+                 (begin (initialize-test-object!)
+                        (set-box! flag #f)
+                        (add-test! test-thunk)
+                        (parameterize [(test-silence #t)] (test))
+                        (if (unbox flag)
+                            (if (empty? (test-object-failed-checks (current-test-object)))
+                                (pair test-thunk #t)
+                                ;; Really hoping there is only one check!
+                                (pair test-thunk (fail-reason-srcloc (failed-check-reason (first (test-object-failed-checks (current-test-object)))))))
+                            #f)))
+               tests)))
+
+;; This function runs the given tests, but with identifiers from `functions`
+;; taken from `path` and replaced in `sub-ns`
+(define (swap-and-run-tests path functions sub-ns test-thunks)
   ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
 
     ;; Get the module where overriding definitions comes from
     (namespace-require path)
     (define path-ns (module->namespace path))
-    ;; Cache old definitions
-    (define old-fns (map (lambda (f) (cons f
-                                           (eval `(,#'first-order->higher-order
-                                                   ,(namespace-symbol->identifier f)) sub-ns)))
-                         functions))
-    ;; Override definitions
-    (parameterize [(current-namespace path-ns)]
+
+    ;; First, check if definitions exist in `path`, bailing out if not
+    (with-handlers ([exn:fail?
+                     (lambda (e)
+                       #f)])
       (for ([fn-sym functions])
         (let [(fun (eval `(,#'first-order->higher-order
                            ,(namespace-symbol->identifier fn-sym)) path-ns))]
-          (parameterize [(current-namespace sub-ns)]
-            (namespace-set-variable-value! fn-sym fun #t)))))
-    ;; Reset test object and run the tests given.
-    (initialize-test-object!)
-    (for-each (lambda (thnk) (add-test! thnk)) test-thunks)
-    (parameterize [(test-silence #t)] (test))
+          #f))
 
-    ;; Reset definitions to what they were originally
-    (parameterize [(current-namespace sub-ns)]
-      (for ([fn old-fns])
-        (namespace-set-variable-value! (car fn) (cdr fn) #t)))
-    ;; Return results
-    (map (lambda (fc)
-           (fail-reason-srcloc (failed-check-reason fc)))
-         (test-object-failed-checks (current-test-object)))))
+      ;; Cache old definitions
+      (define old-fns (map (lambda (f) (cons f
+                                             (eval `(,#'first-order->higher-order
+                                                     ,(namespace-symbol->identifier f)) sub-ns)))
+                           functions))
+      ;; Override definitions, noting that we make them, in addition to being pulled from
+      ;; `path`, flip a flag; this is used so that we can discard tests that are not
+      ;; relevant to the functions listed. This matters in cases where a student
+      ;; submission includes failing tests; if we didn't do that, when we replace _other_
+      ;; functions, those tests would still fail, causing this entry to be marked as failing.
+      (define ran-fn (box #f))
+
+      (parameterize [(current-namespace path-ns)]
+        (for ([fn-sym functions])
+          (let* [(fun (eval `(,#'first-order->higher-order
+                             ,(namespace-symbol->identifier fn-sym)) path-ns))
+                 (fun-flagging (impersonate-procedure fun (lambda args (begin (set-box! ran-fn #t) (apply values args)))))]
+            (parameterize [(current-namespace sub-ns)]
+              (namespace-set-variable-value! fn-sym fun-flagging #t)))))
+      ;; Run given tests
+      (define test-results (run-flagged-tests ran-fn test-thunks))
+
+      ;; Reset definitions to what they were originally
+      (parameterize [(current-namespace sub-ns)]
+        (for ([fn old-fns])
+          (namespace-set-variable-value! (car fn) (cdr fn) #t)))
+      ;; Return results
+      (map pair-snd test-results))))
+
+(define (failing-tests path functions sub-ns test-thunks)
+  (let [(r (swap-and-run-tests path functions sub-ns test-thunks))]
+    (if (false? r)
+        r
+        (filter (lambda (t) (not (equal? t #t))) r))))
 
 (module+ test
   (require rackunit)
@@ -101,8 +140,7 @@
     (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(I) test-ns test-tests)) 3)
     (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F I) test-ns test-tests)) 6)
     (check-equal? (length (failing-tests "test/chaffs-F/zero-identity.rkt" '(F) test-ns test-tests)) 2)
-    (check-exn exn:fail? (lambda ()
-                           (failing-tests "test/chaffs-F/zero-identity.rkt" '(I) test-ns test-tests)))
+    (check-equal? (failing-tests "test/chaffs-F/zero-identity.rkt" '(I) test-ns test-tests) #f)
     (check-equal? (length (failing-tests "test/chaffs-I/empty-str.rkt" '(I) test-ns test-tests)) 2))
 
   (delete-file test-path))
@@ -122,7 +160,7 @@
 (struct chaff [name recognizers] #:transparent)
 (struct testinfo [srcloc detected] #:transparent)
 
-(define (run-examplar! submission-path-orig reference-path-orig examplar-dir functions)
+(define (run-examplar! submission-path-orig reference-path-orig functions)
   ;; For two reasons, we will copy the submission / reference files into new temporary files:
   ;; 1. namespace-require/dynamic-require/anything-i've-found will not instantiate/load
   ;;    a module _twice_, which means that test-engine tests will not be registered
@@ -177,29 +215,17 @@
     ;;
     ;; First, we tag all of the functions in question so that they, when running, first
     ;; flip a flag.
-    (define ran-fn #f)
+    (define ran-fn (box #f))
     (parameterize [(current-namespace sub-ns)]
       (for ([fn-sym functions])
         (let* [(fun (eval `(,#'first-order->higher-order
                             ,(namespace-symbol->identifier fn-sym)) sub-ns))
-               (fun-flagging (impersonate-procedure fun (lambda args (begin (set! ran-fn #t) (apply values args)))))]
+               (fun-flagging (impersonate-procedure fun (lambda args (begin (set-box! ran-fn #t) (apply values args)))))]
           (parameterize [(current-namespace sub-ns)]
             (namespace-set-variable-value! fn-sym fun-flagging #t)))))
 
     (define self-tests
-      (filter pair?
-              (map (lambda (test-thunk)
-                     (begin (initialize-test-object!)
-                            (set! ran-fn #f)
-                            (add-test! test-thunk)
-                            (parameterize [(test-silence #t)] (test))
-                            (if ran-fn
-                                (if (empty? (test-object-failed-checks (current-test-object)))
-                                    (pair test-thunk #t)
-                                    ;; Really hoping there is only one check!
-                                    (pair test-thunk (fail-reason-srcloc (failed-check-reason (first (test-object-failed-checks (current-test-object)))))))
-                                #f)))
-                   submission-tests)))
+      (run-flagged-tests ran-fn submission-tests))
 
     (define self-result
       (self (map pair-fst self-tests)
@@ -247,8 +273,8 @@
 
 
 
-    (define WHEATS-PATH (string-append examplar-dir (wheats-subdir) "/"))
-    (define CHAFFS-PATH (string-append examplar-dir (chaffs-subdir) "/"))
+    (define WHEATS-PATH (string-append (examplar-dir) (wheats-subdir) "/"))
+    (define CHAFFS-PATH (string-append (examplar-dir) (chaffs-subdir) "/"))
 
     (define WHEATS (filter is-racket-file?
                            (map path->string (directory-list WHEATS-PATH))))
@@ -257,13 +283,19 @@
 
     ;; Wheats are relatively straightforward: we want to
     ;; know how many are accepted, giving as score as such.
+    (define wheat-fs (map (lambda (w)
+                            (pair w (swap-and-run-tests (string-append WHEATS-PATH w) functions sub-ns submission-tests)))
+                          WHEATS))
     (define wheat-correctness
-      (correctness WHEATS
-                   (filter
-                    (lambda (wp) (cons? (pair-snd wp)))
-                    (map (lambda (w)
-                           (pair w (failing-tests (string-append WHEATS-PATH w) functions sub-ns submission-tests)))
-                         WHEATS))))
+      (correctness (map pair-fst (filter (lambda (p) (not (false? (pair-snd p)))) wheat-fs))
+                   (map (lambda (p) (pair (pair-fst p)
+                                          (filter (lambda (b) (not (equal? b #t))) (pair-snd p))))
+                        (filter
+                         ;; a failed wheat either:
+                         ;; - has no tests at all
+                         ;; - has at least one failing test
+                         (lambda (wp) (or (empty? (pair-snd wp))
+                                          (not (andmap (lambda (b) (equal? b #t)) (pair-snd wp))))) wheat-fs))))
 
     ;; Chaffs have three different measures. In order to account for that,
     ;; we first record, for each chaff, a list of tests (by srcloc) that
@@ -272,17 +304,21 @@
 
     ;; This is a mapping from
     ;; detected chaffs to the tests that recognized them
+    (define chaff-fs (map (lambda (c)
+                            (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns submission-tests)))
+                          CHAFFS))
+    (define relevant-chaffs (map chaff-name (filter (lambda (c) (not (false? (chaff-recognizers c)))) chaff-fs)))
     (define chaff-records
       (filter (lambda (cr)
-                (not (empty? (chaff-recognizers cr))))
-              (map (lambda (c)
-                     (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns submission-tests)))
-                   CHAFFS)))
+                (and (not (false? (chaff-recognizers cr)))
+                     (not (empty? (chaff-recognizers cr)))))
+              chaff-fs))
 
     ;; How many of the chaffs did test miss?
     (define chaff-thoroughness
       (let [(detected (map chaff-name chaff-records))]
-        (thoroughness CHAFFS (filter (lambda (c) (not (member c detected))) CHAFFS))))
+        (thoroughness relevant-chaffs
+                      (filter (lambda (c) (not (member c detected))) relevant-chaffs))))
 
     ;; Are chaffs detected by _different_ sets of tests?
     (define chaff-precision
@@ -330,8 +366,8 @@
 
 (module+ test
   (require rackunit)
-  (define er (run-examplar! "test/submission.rkt" "test/reference.rkt" "test/" '(F I)))
-  ;(display er)
+  (define er (parameterize [(examplar-dir "test/")]
+               (run-examplar! "test/submission.rkt" "test/reference.rkt" '(F I))))
 
   (check-equal? (length (self-tests-failed (result-self er))) 0)
 
@@ -361,4 +397,132 @@
    (map pair-snd (usefulness-map (result-usefulness er)))
    '(("empty.rkt" "empty2.rkt" "identity.rkt")
      ("empty.rkt" "empty2.rkt")
-     ("identity.rkt"))))
+     ("identity.rkt")))
+
+  ;; in this test, we have a chaff with _no_ implementation for the I function;
+  ;; we want this to work fine!
+  (define er1 (parameterize [(examplar-dir "test/")
+                             (chaffs-subdir "chaffs-F")]
+                (run-examplar! "test/submission.rkt" "test/reference.rkt" '(I))))
+
+  ;; wheat is unchanged
+  (check-equal? (map length (map pair-snd (correctness-wheat-failing (result-wheat er1))))
+                '(2))
+  ;; for chaffs, there are none that have an I implementation, so none we need to detect
+  (check-equal? (result-chaff er1) (thoroughness '() '()))
+
+  )
+
+
+;; What follows is code to run / format the results for gradescope. Obviously, no requirement
+;; to use it! Currently, it is _ignoring_ the last two chaff measures, as giving actionable
+;; feedback from that will require more work.
+
+(struct point-allocation [pth fn self ref wht chf] #:transparent)
+
+(define (self-calc pa r)
+  (if (empty? (self-tests-run r))
+      0
+      (* (point-allocation-self pa)
+         (/ (- (length (self-tests-run r))
+               (length (self-tests-failed r)))
+            (length (self-tests-run r))))))
+
+(define (self-results pa r)
+  `#hasheq((score . ,(exact->inexact (self-calc pa r)))
+           (max_score . ,(point-allocation-self pa))
+           (output . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' passed "
+                                     (number->string (- (length (self-tests-run r))
+                                                        (length (self-tests-failed r))))
+                                     "/"
+                                     (number->string (length (self-tests-run r)))
+                                     " of its own tests."))))
+
+
+(define (reference-calc pa r)
+  (if (empty? (reference-tests-run r))
+      0
+      (* (point-allocation-ref pa)
+         (/ (- (length (reference-tests-run r))
+               (length (reference-tests-failed r)))
+            (length (reference-tests-run r))))))
+
+(define (reference-results pa r)
+  `#hasheq((score . ,(exact->inexact (reference-calc pa r)))
+           (max_score . ,(point-allocation-ref pa))
+           (output . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' implementation passed "
+                                     (number->string (- (length (reference-tests-run r))
+                                                        (length (reference-tests-failed r))))
+                                     "/"
+                                     (number->string (length (reference-tests-run r)))
+                                     " reference tests."))))
+
+(define (wheat-calc pa w)
+  (if (empty? (correctness-wheat-all w))
+      0
+      (* (point-allocation-wht pa)
+         (/ (- (length (correctness-wheat-all w))
+               (length (correctness-wheat-failing w)))
+            (length (correctness-wheat-all w))))))
+
+(define (wheat-results pa w)
+  `#hasheq((score . ,(exact->inexact (wheat-calc pa w)))
+           (max_score . ,(point-allocation-wht pa))
+           (output . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' tests passed against "
+                                     (number->string (- (length (correctness-wheat-all w))
+                                                        (length (correctness-wheat-failing w))))
+                                     "/"
+                                     (number->string (length (correctness-wheat-all w)))
+                                     " known good implementations."
+                                     ))))
+
+
+(define (chaff-calc pa c)
+  (if (empty? (thoroughness-chaff-all c))
+      0
+      (* (point-allocation-chf pa)
+         (/ (- (length (thoroughness-chaff-all c))
+               (length (thoroughness-chaff-accepted c)))
+            (length (thoroughness-chaff-all c))))))
+
+(define (chaff-results pa c)
+  `#hasheq((score . ,(exact->inexact (chaff-calc pa c)))
+           (max_score . ,(point-allocation-chf pa))
+           (output . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' tests identified "
+                                     (number->string (- (length (thoroughness-chaff-all c))
+                                                        (length (thoroughness-chaff-accepted c))))
+                                     "/"
+                                     (number->string (length (thoroughness-chaff-all c)))
+                                     " known buggy implementations."
+                                     ))))
+
+
+(define (function-results pa submission-path)
+  (let* ([er (run-examplar! submission-path (point-allocation-pth pa) (list (point-allocation-fn pa)))])
+    (begin
+      #;(printf "~a: ~a\n" pa er)
+         (cons
+          (+ (self-calc pa (result-self er))
+             (reference-calc pa (result-reference er))
+             (wheat-calc pa (result-wheat er))
+             (chaff-calc pa (result-chaff er)))
+          (list (self-results pa (result-self er))
+                (reference-results pa (result-reference er))
+                (wheat-results pa (result-wheat er))
+                (chaff-results pa (result-chaff er)))))))
+
+(define (run-gradescope assignment submission-path)
+  (write-json
+   (with-handlers ([exn:fail?
+                    (lambda (e)
+                      `#hasheq((score . "0")
+                               ;; This is perhaps a little bold, as it assumes the error will never
+                               ;; arise from _our_ code...
+                               (output . ,(string-append "Your program failed to run, giving error: \n"
+                                                         (exn-message e)
+                                                         "\nIf you believe this to to an issue with the autograding infrastructure, please contact course staff."))))])
+     (let* ([rs (map (lambda (pa) (function-results pa submission-path)) assignment)]
+            [total-points (apply + (map car rs))]
+            [score-str (number->string (exact->inexact total-points))])
+       `#hasheq((score . ,score-str)
+                (tests . ,(apply append (map cdr rs))))))))
