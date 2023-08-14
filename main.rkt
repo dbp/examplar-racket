@@ -431,13 +431,13 @@
 (define (self-results pa r)
   `#hasheq((score . ,(exact->inexact (self-calc pa r)))
            (max_score . ,(point-allocation-self pa))
-           (name . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' on own tests"))
+           (name . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' on student submitted tests"))
            (output . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' passed "
                                      (number->string (- (length (self-tests-run r))
                                                         (length (self-tests-failed r))))
                                      "/"
                                      (number->string (length (self-tests-run r)))
-                                     " of its own tests."))))
+                                     " of student submitted tests."))))
 
 
 (define (reference-calc pa r)
@@ -451,13 +451,13 @@
 (define (reference-results pa r)
   `#hasheq((score . ,(exact->inexact (reference-calc pa r)))
            (max_score . ,(point-allocation-ref pa))
-           (name . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' on reference tests"))
+           (name . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' on instructor tests"))
            (output . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' implementation passed "
                                      (number->string (- (length (reference-tests-run r))
                                                         (length (reference-tests-failed r))))
                                      "/"
                                      (number->string (length (reference-tests-run r)))
-                                     " reference tests."))))
+                                     " instructor tests."))))
 
 (define (wheat-calc pa w)
   (if (empty? (correctness-wheat-all w))
@@ -470,13 +470,13 @@
 (define (wheat-results pa w)
   `#hasheq((score . ,(exact->inexact (wheat-calc pa w)))
            (max_score . ,(point-allocation-wht pa))
-           (name . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' tests validated on known good implementations"))
+           (name . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' tests validated on instructor correct implementations"))
            (output . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' tests passed against "
                                      (number->string (- (length (correctness-wheat-all w))
                                                         (length (correctness-wheat-failing w))))
                                      "/"
                                      (number->string (length (correctness-wheat-all w)))
-                                     " known good implementations."
+                                     " instructor correct implementations."
                                      ))))
 
 
@@ -491,13 +491,13 @@
 (define (chaff-results pa c)
   `#hasheq((score . ,(exact->inexact (chaff-calc pa c)))
            (max_score . ,(point-allocation-chf pa))
-           (name . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' tests identifying known bad implementations"))
+           (name . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' tests identifying instructor buggy implementations"))
            (output . ,(string-append "'" (symbol->string (point-allocation-fn pa)) "' tests identified "
                                      (number->string (- (length (thoroughness-chaff-all c))
                                                         (length (thoroughness-chaff-accepted c))))
                                      "/"
                                      (number->string (length (thoroughness-chaff-all c)))
-                                     " known buggy implementations."
+                                     " instructor buggy implementations."
                                      ))))
 
 
