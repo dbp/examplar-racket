@@ -20,7 +20,8 @@
          chaffs-subdir
 
          run-gradescope
-         (struct-out point-allocation))
+         (struct-out point-allocation)
+         problem)
 
 (define examplar-dir (make-parameter ""))
 (define wheats-subdir (make-parameter "wheats"))
@@ -70,8 +71,8 @@
                tests)))
 
 ;; This function runs the given tests, but with identifiers from `functions`
-;; taken from `path` and replaced in `sub-ns`
-(define (swap-and-run-tests path functions sub-ns test-thunks)
+;; taken from `path` and replaced in `sub-ns`.
+(define (swap-and-run-tests path functions sub-ns test-thunks overrides)
   ; force BSL/ISL/ISL+ to be ASL
   (parameterize [(current-module-name-resolver my-resolver)]
 
@@ -83,7 +84,7 @@
     (with-handlers ([exn:fail?
                      (lambda (e)
                        #f)])
-      (for ([fn-sym functions])
+      (for ([fn-sym (append functions overrides)])
         (let [(fun (eval `(,#'first-order->higher-order
                            ,(namespace-symbol->identifier fn-sym)) path-ns))]
           #f))
@@ -93,7 +94,12 @@
                                              (eval `(,#'first-order->higher-order
                                                      ,(namespace-symbol->identifier f)) sub-ns)))
                            functions))
-      ;; Override definitions, noting that we make them, in addition to being pulled from
+      (define old-overrides (map (lambda (f) (cons f
+                                                   (eval `(,#'first-order->higher-order
+                                                           ,(namespace-symbol->identifier f)) path-ns)))
+                           overrides))
+
+      ;; Set definitions, noting that we make them, in addition to being pulled from
       ;; `path`, flip a flag; this is used so that we can discard tests that are not
       ;; relevant to the functions listed. This matters in cases where a student
       ;; submission includes failing tests; if we didn't do that, when we replace _other_
@@ -107,6 +113,15 @@
                  (fun-flagging (impersonate-procedure fun (lambda args (begin (set-box! ran-fn #t) (apply values args)))))]
             (parameterize [(current-namespace sub-ns)]
               (namespace-set-variable-value! fn-sym fun-flagging #t)))))
+
+      ;; we want to replace the overrided functions, but in the other direction; the reason is that they may have used these overrided functions to build constants, whereas in _our_ code we can be sure to always hide them behind thunks.
+      (parameterize [(current-namespace sub-ns)]
+        (for ([fn-sym overrides])
+          (let* [(fun (eval `(,#'first-order->higher-order
+                              ,(namespace-symbol->identifier fn-sym)) sub-ns))]
+            (parameterize [(current-namespace path-ns)]
+              (namespace-set-variable-value! fn-sym fun #t)))))
+
       ;; Run given tests
       (define test-results (run-flagged-tests ran-fn test-thunks))
 
@@ -114,11 +129,15 @@
       (parameterize [(current-namespace sub-ns)]
         (for ([fn old-fns])
           (namespace-set-variable-value! (car fn) (cdr fn) #t)))
+      (parameterize [(current-namespace path-ns)]
+        (for ([fn old-overrides])
+          (namespace-set-variable-value! (car fn) (cdr fn) #t)))
+
       ;; Return results
       (map pair-snd test-results))))
 
-(define (failing-tests path functions sub-ns test-thunks)
-  (let [(r (swap-and-run-tests path functions sub-ns test-thunks))]
+(define (failing-tests path functions sub-ns test-thunks overrides)
+  (let [(r (swap-and-run-tests path functions sub-ns test-thunks overrides))]
     (if (false? r)
         r
         (filter (lambda (t) (not (equal? t #t))) r))))
@@ -132,16 +151,16 @@
     (namespace-require test-path)
     (define test-ns (module->namespace test-path))
     (define test-tests (test-object-tests (current-test-object)))
-    (check-equal? (failing-tests "test/wheats/wheat1.rkt" '(F) test-ns test-tests) '())
-    (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(I) test-ns test-tests)) 2)
-    (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(F I) test-ns test-tests)) 2)
-    (check-equal? (failing-tests "test/chaffs/identity.rkt" '() test-ns test-tests) '())
-    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F) test-ns test-tests)) 3)
-    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(I) test-ns test-tests)) 3)
-    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F I) test-ns test-tests)) 6)
-    (check-equal? (length (failing-tests "test/chaffs-F/zero-identity.rkt" '(F) test-ns test-tests)) 2)
-    (check-equal? (failing-tests "test/chaffs-F/zero-identity.rkt" '(I) test-ns test-tests) #f)
-    (check-equal? (length (failing-tests "test/chaffs-I/empty-str.rkt" '(I) test-ns test-tests)) 2))
+    (check-equal? (failing-tests "test/wheats/wheat1.rkt" '(F) test-ns test-tests '()) '())
+    (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(I) test-ns test-tests '())) 2)
+    (check-equal? (length (failing-tests "test/wheats/wheat1.rkt" '(F I) test-ns test-tests '())) 2)
+    (check-equal? (failing-tests "test/chaffs/identity.rkt" '() test-ns test-tests '()) '())
+    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F) test-ns test-tests '())) 3)
+    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(I) test-ns test-tests '())) 3)
+    (check-equal? (length (failing-tests "test/chaffs/identity.rkt" '(F I) test-ns test-tests '())) 6)
+    (check-equal? (length (failing-tests "test/chaffs-F/zero-identity.rkt" '(F) test-ns test-tests '())) 2)
+    (check-equal? (failing-tests "test/chaffs-F/zero-identity.rkt" '(I) test-ns test-tests '()) #f)
+    (check-equal? (length (failing-tests "test/chaffs-I/empty-str.rkt" '(I) test-ns test-tests '())) 2))
 
   (delete-file test-path))
 
@@ -160,7 +179,7 @@
 (struct chaff [name recognizers] #:transparent)
 (struct testinfo [srcloc detected] #:transparent)
 
-(define (run-examplar! submission-path-orig reference-path-orig functions)
+(define (run-examplar! submission-path-orig reference-path-orig functions overrides)
   ;; For two reasons, we will copy the submission / reference files into new temporary files:
   ;; 1. namespace-require/dynamic-require/anything-i've-found will not instantiate/load
   ;;    a module _twice_, which means that test-engine tests will not be registered
@@ -247,7 +266,7 @@
                          functions))
 
     (parameterize [(current-namespace sub-ns)]
-      (for ([fn-sym functions])
+      (for ([fn-sym (append functions overrides)])
         (let [(fun (eval `(,#'first-order->higher-order
                            ,(namespace-symbol->identifier fn-sym)) sub-ns))]
           (parameterize [(current-namespace ref-ns)]
@@ -284,7 +303,7 @@
     ;; Wheats are relatively straightforward: we want to
     ;; know how many are accepted, giving as score as such.
     (define wheat-fs (map (lambda (w)
-                            (pair w (swap-and-run-tests (string-append WHEATS-PATH w) functions sub-ns submission-tests)))
+                            (pair w (swap-and-run-tests (string-append WHEATS-PATH w) functions sub-ns submission-tests overrides)))
                           WHEATS))
     (define wheat-correctness
       (correctness (map pair-fst (filter (lambda (p) (not (false? (pair-snd p)))) wheat-fs))
@@ -305,7 +324,7 @@
     ;; This is a mapping from
     ;; detected chaffs to the tests that recognized them
     (define chaff-fs (map (lambda (c)
-                            (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns submission-tests)))
+                            (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns submission-tests overrides)))
                           CHAFFS))
     (define relevant-chaffs (map chaff-name (filter (lambda (c) (not (false? (chaff-recognizers c)))) chaff-fs)))
     (define chaff-records
@@ -367,7 +386,7 @@
 (module+ test
   (require rackunit)
   (define er (parameterize [(examplar-dir "test/")]
-               (run-examplar! "test/submission.rkt" "test/reference.rkt" '(F I))))
+               (run-examplar! "test/submission.rkt" "test/reference.rkt" '(F I) '())))
 
   (check-equal? (length (self-tests-failed (result-self er))) 0)
 
@@ -403,7 +422,7 @@
   ;; we want this to work fine!
   (define er1 (parameterize [(examplar-dir "test/")
                              (chaffs-subdir "chaffs-F")]
-                (run-examplar! "test/submission.rkt" "test/reference.rkt" '(I))))
+                (run-examplar! "test/submission.rkt" "test/reference.rkt" '(I) '())))
 
   ;; wheat is unchanged
   (check-equal? (map length (map pair-snd (correctness-wheat-failing (result-wheat er1))))
@@ -418,7 +437,14 @@
 ;; to use it! Currently, it is _ignoring_ the last two chaff measures, as giving actionable
 ;; feedback from that will require more work.
 
-(struct point-allocation [pth fn self ref wht chf] #:transparent)
+(struct point-allocation [pth fn self ref wht chf overrides] #:transparent)
+
+(define (problem pth fn #:student self
+                        #:instructor ref
+                        #:correct correct
+                        #:buggy buggy
+                        #:override [overrides '()])
+  (point-allocation pth fn self ref correct buggy overrides))
 
 (define (self-calc pa r)
   (if (empty? (self-tests-run r))
@@ -502,7 +528,7 @@
 
 
 (define (function-results pa submission-path)
-  (let* ([er (run-examplar! submission-path (point-allocation-pth pa) (list (point-allocation-fn pa)))])
+  (let* ([er (run-examplar! submission-path (point-allocation-pth pa) (list (point-allocation-fn pa)) (point-allocation-overrides pa))])
     (begin
       #;(printf "~a: ~a\n" pa er)
          (cons
