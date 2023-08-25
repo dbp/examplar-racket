@@ -302,9 +302,10 @@
 
     ;; Wheats are relatively straightforward: we want to
     ;; know how many are accepted, giving as score as such.
-    (define wheat-fs (map (lambda (w)
-                            (pair w (swap-and-run-tests (string-append WHEATS-PATH w) functions sub-ns submission-tests overrides)))
-                          WHEATS))
+    (define wheat-fs (filter (lambda (w) (not (false? (pair-snd w))))
+                             (map (lambda (w)
+                                    (pair w (swap-and-run-tests (string-append WHEATS-PATH w) functions sub-ns submission-tests overrides)))
+                                  WHEATS)))
     (define wheat-correctness
       (correctness (map pair-fst (filter (lambda (p) (not (false? (pair-snd p)))) wheat-fs))
                    (map (lambda (p) (pair (pair-fst p)
