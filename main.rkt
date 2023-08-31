@@ -3,6 +3,8 @@
 (require lang/prim)
 (require test-engine/racket-tests)
 (require test-engine/test-engine)
+(require test-engine/test-markup)
+(require simple-tree-text-markup/text)
 (require json)
 
 (provide run-examplar!
@@ -26,6 +28,17 @@
 (define examplar-dir (make-parameter ""))
 (define wheats-subdir (make-parameter "wheats"))
 (define chaffs-subdir (make-parameter "chaffs"))
+
+(define (debug msg)
+  (if (getenv "DEBUG")
+      (fprintf (current-error-port) "DEBUG: ~a\n" msg)
+      #f))
+
+(define (debug* msg)
+  (if (getenv "DEBUG")
+      (fprintf (current-error-port) "~a" msg)
+      #f))
+
 
 (define glob-resolve (current-module-name-resolver))
 
@@ -64,9 +77,15 @@
                         (parameterize [(test-silence #t)] (test))
                         (if (unbox flag)
                             (if (empty? (test-object-failed-checks (current-test-object)))
-                                (pair test-thunk #t)
+                                (begin
+                                  (debug "✓")
+                                  (pair test-thunk #t))
                                 ;; Really hoping there is only one check!
-                                (pair test-thunk (fail-reason-srcloc (failed-check-reason (first (test-object-failed-checks (current-test-object)))))))
+                                (let [(o (open-output-string))]
+                                  (begin
+                                    (display-markup (test-object->markup (current-test-object)) o)
+                                    (debug (format "✗(~a)" (get-output-string o)))
+                                    (pair test-thunk (fail-reason-srcloc (failed-check-reason (first (test-object-failed-checks (current-test-object)))))))))
                             #f)))
                tests)))
 
@@ -81,9 +100,8 @@
     (define path-ns (module->namespace path))
 
     ;; First, check if definitions exist in `path`, bailing out if not
-    (with-handlers ([exn:fail?
-                     (lambda (e)
-                       #f)])
+    (with-handlers ([exn:fail:syntax?
+                     (lambda (e) #f)])
       (for ([fn-sym (append functions overrides)])
         (let [(fun (eval `(,#'first-order->higher-order
                            ,(namespace-symbol->identifier fn-sym)) path-ns))]
@@ -114,6 +132,7 @@
             (parameterize [(current-namespace sub-ns)]
               (namespace-set-variable-value! fn-sym fun-flagging #t)))))
 
+      (debug (format "OVERRIDING ~a" overrides))
       ;; we want to replace the overrided functions, but in the other direction; the reason is that they may have used these overrided functions to build constants, whereas in _our_ code we can be sure to always hide them behind thunks.
       (parameterize [(current-namespace sub-ns)]
         (for ([fn-sym overrides])
@@ -197,6 +216,8 @@
   ;; - We only ever _extract_ definitions from them, so we don't actually need to
   ;;   change the language (and, indeed, they could be written in, e.g. #lang racket)
 
+  (debug (format "EXAMPLAR :: ~a(~a) with ~a" submission-path-orig functions reference-path-orig))
+
   (define submission-path (make-temporary-file "examplartmp~a.rkt" #:copy-from submission-path-orig))
   (define reference-path (make-temporary-file "examplartmp~a.rkt" #:copy-from reference-path-orig))
 
@@ -243,6 +264,7 @@
           (parameterize [(current-namespace sub-ns)]
             (namespace-set-variable-value! fn-sym fun-flagging #t)))))
 
+    (debug "SELF TESTS")
     (define self-tests
       (run-flagged-tests ran-fn submission-tests))
 
@@ -254,10 +276,14 @@
     (initialize-test-object!)
 
 
+    (debug "REFERENCE TESTS")
 
     ;; Next, we run their solution against our reference test suite
+    ;; Note that while there shouldn't be as many extraneous tests (so
+    ;; the flagging is not as necessary), there may be helpers we wrote
+    ;; that do not need to count towards their test count, so flagging is
+    ;; still useful.
 
-    ;; TODO: refactor this, as its copy-paste from `failing-tests` above.
     ;; To do this, we put their functions into our reference modules
     (define ref-ns (module->namespace reference-path))
     (define old-fns (map (lambda (f) (cons f
@@ -267,30 +293,29 @@
 
     (parameterize [(current-namespace sub-ns)]
       (for ([fn-sym (append functions overrides)])
-        (let [(fun (eval `(,#'first-order->higher-order
-                           ,(namespace-symbol->identifier fn-sym)) sub-ns))]
+        (let* [(fun (eval `(,#'first-order->higher-order
+                            ,(namespace-symbol->identifier fn-sym)) sub-ns))
+               (fun-flagging (impersonate-procedure fun (lambda args (begin (set-box! ran-fn #t) (apply values args)))))]
           (parameterize [(current-namespace ref-ns)]
-            (namespace-set-variable-value! fn-sym fun #t)))))
+            (namespace-set-variable-value! fn-sym fun-flagging #t)))))
     ;; Now run our tests
-    (initialize-test-object!)
-    (for-each (lambda (thnk) (add-test! thnk)) reference-tests)
-    (parameterize [(test-silence #t)] (test))
+    (define reference-test-results
+      (run-flagged-tests ran-fn reference-tests))
 
     ;; Reset definitions to what they were originally
-    (parameterize [(current-namespace sub-ns)]
+    (parameterize [(current-namespace ref-ns)]
       (for ([fn old-fns])
         (namespace-set-variable-value! (car fn) (cdr fn) #t)))
 
     (define reference-result
-      (reference (test-object-tests (current-test-object))
-                 (map (lambda (fc)
-                        (fail-reason-srcloc (failed-check-reason fc)))
-                      (test-object-failed-checks (current-test-object)))))
+      (reference (map pair-fst reference-test-results) ;(test-object-tests (current-test-object))
+                 (map pair-snd (filter (lambda (p) (not (equal? (pair-snd p) #t))) reference-test-results))))
+
 
     ;; Now we reset what test-engine knows about.
     (initialize-test-object!)
 
-
+    (debug "STUDENT TESTS AGAINST CORRECT SOLUTION")
 
     (define WHEATS-PATH (string-append (examplar-dir) (wheats-subdir) "/"))
     (define CHAFFS-PATH (string-append (examplar-dir) (chaffs-subdir) "/"))
@@ -321,11 +346,14 @@
     ;; we first record, for each chaff, a list of tests (by srcloc) that
     ;; detect it.
 
+    (debug "STUDENT TESTS AGAINST BUGGY SOLUTION")
 
     ;; This is a mapping from
     ;; detected chaffs to the tests that recognized them
     (define chaff-fs (map (lambda (c)
-                            (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns submission-tests overrides)))
+                            (begin
+                              (debug (format "CHAFF ~a" c))
+                              (chaff c (failing-tests (string-append CHAFFS-PATH c) functions sub-ns submission-tests overrides))))
                           CHAFFS))
     (define relevant-chaffs (map chaff-name (filter (lambda (c) (not (false? (chaff-recognizers c)))) chaff-fs)))
     (define chaff-records
