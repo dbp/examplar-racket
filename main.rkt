@@ -572,16 +572,19 @@
 
 (define (run-gradescope assignment submission-path)
   (write-json
-   (with-handlers ([exn:fail?
-                    (lambda (e)
-                      `#hasheq((score . "0")
-                               ;; This is perhaps a little bold, as it assumes the error will never
-                               ;; arise from _our_ code...
-                               (output . ,(string-append "Your program failed to run, giving error: \n"
-                                                         (exn-message e)
-                                                         "\nIf you believe this to to an issue with the autograding infrastructure, please contact course staff."))))])
-     (let* ([rs (map (lambda (pa) (function-results pa submission-path)) assignment)]
-            [total-points (apply + (map car rs))]
-            [score-str (number->string (exact->inexact total-points))])
-       `#hasheq((score . ,score-str)
-                (tests . ,(apply append (map cdr rs))))))))
+   ;; we write json to the previous output port (contextually, a grader result file),
+   ;; but anything outputted by the code we run is redirected so only the json is added
+   (parameterize ([current-output-port (current-error-port)])
+     (with-handlers ([exn:fail?
+                      (lambda (e)
+                        `#hasheq((score . "0")
+                                 ;; This is perhaps a little bold, as it assumes the error will never
+                                 ;; arise from _our_ code...
+                                 (output . ,(string-append "Your program failed to run, giving error: \n"
+                                                           (exn-message e)
+                                                           "\nIf you believe this to to an issue with the autograding infrastructure, please contact course staff."))))])
+       (let* ([rs (map (lambda (pa) (function-results pa submission-path)) assignment)]
+              [total-points (apply + (map car rs))]
+              [score-str (number->string (exact->inexact total-points))])
+         `#hasheq((score . ,score-str)
+                  (tests . ,(apply append (map cdr rs)))))))))
