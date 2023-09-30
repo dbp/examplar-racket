@@ -5,6 +5,10 @@
 (require test-engine/test-engine)
 (require test-engine/test-markup)
 (require simple-tree-text-markup/text)
+(require (only-in test-engine/syntax
+                  report-signature-violation!))
+(require (only-in deinprogramm/signature/signature
+                  signature-violation-proc))
 (require json)
 
 (provide run-examplar!
@@ -38,6 +42,17 @@
   (if (getenv "DEBUG")
       (fprintf (current-error-port) "~a" msg)
       #f))
+
+;; the default handler for signatures is to throw exceptions;
+;; this is _not_ how it works within *SL, and we do not want
+;; this inconsistency. The only places we are going to have
+;; signatures, we expect violations to result in reports
+;; to test-engine (which we may ignore...), so we'll set
+;; this parameter _globally_.
+(signature-violation-proc
+ (lambda (obj signature message blame-srcloc)
+     (report-signature-violation! obj signature message blame-srcloc)))
+
 
 
 (define glob-resolve (current-module-name-resolver))
@@ -89,6 +104,26 @@
                             #f)))
                tests)))
 
+(module+ test
+  (require rackunit)
+  (define signature-violating-test-path
+    (make-temporary-file "examplartmp~a.rkt" #:copy-from "test/bad-signatures.rkt"))
+  ; force BSL/ISL/ISL+ to be ASL
+  (parameterize [(current-module-name-resolver my-resolver)]
+    (namespace-require signature-violating-test-path)
+    (define test-ns (module->namespace signature-violating-test-path))
+    (define test-tests (test-object-tests (current-test-object)))
+    (define flag (box #f))
+    (parameterize [(current-namespace test-ns)]
+      (let* [(fun (eval `(,#'first-order->higher-order
+                          ,(namespace-symbol->identifier 'f)) test-ns))
+             (fun-flagging (impersonate-procedure fun (lambda args (begin (set-box! flag #t) (apply values args)))))]
+        (namespace-set-variable-value! 'f fun-flagging #t)))
+
+    (check-equal? (length (run-flagged-tests flag test-tests)) 1)))
+
+
+
 ;; This function runs the given tests, but with identifiers from `functions`
 ;; taken from `path` and replaced in `sub-ns`.
 (define (swap-and-run-tests path functions sub-ns test-thunks overrides)
@@ -101,6 +136,8 @@
 
     ;; First, check if definitions exist in `path`, bailing out if not
     (with-handlers ([exn:fail:syntax?
+                     (lambda (e) #f)]
+                    [exn:fail:contract:variable?
                      (lambda (e) #f)])
       (for ([fn-sym (append functions overrides)])
         (let [(fun (eval `(,#'first-order->higher-order
