@@ -258,7 +258,9 @@
   (define submission-path (make-temporary-file "examplartmp~a.rkt" #:copy-from submission-path-orig))
   (let-values ([(base-orig _1 _2) (split-path submission-path-orig)]
                [(base-new _3 _4) (split-path submission-path)])
-    (for ([f deps]) (copy-file (build-path base-orig f) (build-path base-new f))))
+    (for ([f deps]) (begin
+                      (debug "COPYING DEPENDENCY ~a TO ~a" (build-path base-orig f) (build-path base-new f))
+                      (copy-file (build-path base-orig f) (build-path base-new f)))))
   (define reference-path (make-temporary-file "examplartmp~a.rkt" #:copy-from reference-path-orig))
 
   ; force BSL/ISL/ISL+ to be ASL
