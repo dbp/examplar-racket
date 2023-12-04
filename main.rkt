@@ -595,8 +595,8 @@
                                      ))))
 
 
-(define (function-results pa submission-path)
-  (let* ([er (run-examplar! submission-path (point-allocation-pth pa) (list (point-allocation-fn pa)) (point-allocation-overrides pa))])
+(define (function-results pa submission-path deps)
+  (let* ([er (run-examplar! submission-path #:dependency-paths deps (point-allocation-pth pa) (list (point-allocation-fn pa)) (point-allocation-overrides pa))])
     (begin
       #;(printf "~a: ~a\n" pa er)
          (cons
@@ -609,7 +609,7 @@
                 (wheat-results pa (result-wheat er))
                 (chaff-results pa (result-chaff er)))))))
 
-(define (run-gradescope assignment submission-path)
+(define (run-gradescope assignment submission-path #:dependency-paths [deps '()])
   (write-json
    ;; we write json to the previous output port (contextually, a grader result file),
    ;; but anything outputted by the code we run is redirected so only the json is added
@@ -622,7 +622,7 @@
                                  (output . ,(string-append "Your program failed to run, giving error: \n"
                                                            (exn-message e)
                                                            "\nIf you believe this to to an issue with the autograding infrastructure, please contact course staff."))))])
-       (let* ([rs (map (lambda (pa) (function-results pa submission-path)) assignment)]
+       (let* ([rs (map (lambda (pa) (function-results pa submission-path deps)) assignment)]
               [total-points (apply + (map car rs))]
               [score-str (number->string (exact->inexact total-points))])
          `#hasheq((score . ,score-str)
