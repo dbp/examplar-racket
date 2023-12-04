@@ -253,13 +253,13 @@
   ;; - We only ever _extract_ definitions from them, so we don't actually need to
   ;;   change the language (and, indeed, they could be written in, e.g. #lang racket)
 
-  (debug (format "EXAMPLAR :: ~a(~a) with ~a" submission-path-orig functions reference-path-orig))
+  (debug (format "EXAMPLAR :: ~a(~a) with ~a (using ~a)" submission-path-orig functions reference-path-orig deps))
 
   (define submission-path (make-temporary-file "examplartmp~a.rkt" #:copy-from submission-path-orig))
   (let-values ([(base-orig _1 _2) (split-path submission-path-orig)]
                [(base-new _3 _4) (split-path submission-path)])
     (for ([f deps]) (begin
-                      (debug "COPYING DEPENDENCY ~a TO ~a" (build-path base-orig f) (build-path base-new f))
+                      (debug (format "COPYING DEPENDENCY ~a TO ~a" (build-path base-orig f) (build-path base-new f)))
                       (copy-file (build-path base-orig f) (build-path base-new f)))))
   (define reference-path (make-temporary-file "examplartmp~a.rkt" #:copy-from reference-path-orig))
 
