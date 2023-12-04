@@ -235,7 +235,7 @@
 (struct chaff [name recognizers] #:transparent)
 (struct testinfo [srcloc detected] #:transparent)
 
-(define (run-examplar! submission-path-orig reference-path-orig functions overrides)
+(define (run-examplar! submission-path-orig #:dependency-paths [deps '()] reference-path-orig functions overrides)
   ;; For two reasons, we will copy the submission / reference files into new temporary files:
   ;; 1. namespace-require/dynamic-require/anything-i've-found will not instantiate/load
   ;;    a module _twice_, which means that test-engine tests will not be registered
@@ -256,6 +256,8 @@
   (debug (format "EXAMPLAR :: ~a(~a) with ~a" submission-path-orig functions reference-path-orig))
 
   (define submission-path (make-temporary-file "examplartmp~a.rkt" #:copy-from submission-path-orig))
+  (let-values ([(base _1 _2) (split-path submission-path)])
+    (for ([f deps]) (copy-file f (build-path base f))))
   (define reference-path (make-temporary-file "examplartmp~a.rkt" #:copy-from reference-path-orig))
 
   ; force BSL/ISL/ISL+ to be ASL
